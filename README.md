@@ -9,164 +9,47 @@ By analyzing the "why" behind the data—such as detecting "silent churn" where 
 
 ## Architecture
 
-### Clean Architecture Diagram
-
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         PRESENTATION LAYER                                   │
-│                                                                              │
-│  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────┐  ┌───────┐   │
-│  │ Risk Summary    │  │ Account Drill-   │  │ Data Quality  │  │Export │   │
-│  │ (Table + KPIs)  │  │ Down (Signals)   │  │ Report        │  │ (CSV) │   │
-│  └────────┬────────┘  └────────┬─────────┘  └───────┬───────┘  └───┬───┘   │
-│           │                    │                     │              │        │
-│           └────────────────────┴─────────────────────┴──────────────┘        │
-│                                  │                                           │
-│                    ┌─────────────▼───────────────┐                          │
-│                    │   pages/               │                          │
-│                    │   app.py (Streamlit)  │                          │
-│                    └──────────┬──────────────┘                          │
-└──────────────────────────────┼────────────────────────────────────────┘
-                               │
-┌──────────────────────────────┼────────────────────────────────────────┐
-│                    ORCHESTRATION LAYER                              │
-│                                                                      │
-│    ┌─────────────────────────────────────────────────────────────┐  │
-│    │  main.py / runner.py (Pipeline Orchestration)            │  │
-│    │  ├─ Load data                                             │  │
-│    │  ├─ Reconcile accounts                                   │  │
-│    │  ├─ Run 4 parallel analyzers                            │  │
-│    │  ├─ Extract LLM signals                                 │  │
-│    │  ├─ Compute risk scores                                 │  │
-│    │  └─ Render dashboard                                    │  │
-│    └──────────────────────────────────────────────────────────┘  │
-│                                                                      │
-└──────────────────────────────┬────────────────────────────────────────┘
-                               │
-┌──────────────────────────────┼────────────────────────────────────────┐
-│               BUSINESS LOGIC / DOMAIN LAYER                           │
-│                                                                        │
-│  ┌─────────────────────────┐  ┌─────────────────────────────────┐   │
-│  │     ANALYSIS LAYER      │  │      RISK SCORING LAYER         │   │
-│  │                         │  │                                 │   │
-│  │ • usage_analyzer        │  │ • signals.py (normalize)       │   │
-│  │   (regression trends)   │  │   (all signals → 0-1 range)    │   │
-│  │                         │  │                                 │   │
-│  │ • ticket_analyzer       │  │ • scoring.py (weighted sum)    │   │
-│  │   (P1, open, SLA)      │  │   (12 weights × signals)        │   │
-│  │                         │  │                                 │   │
-│  │ • nps_analyzer          │  │ • explanations (signal          │   │
-│  │   (score + validation)  │  │   breakdown, recommendations)   │   │
-│  │                         │  │                                 │   │
-│  │ • changelog_analyzer    │  │ WEIGHTS JUSTIFY EACH SIGNAL:   │   │
-│  │   (deprecation risk)    │  │ ├─ Usage Decline: 20%         │   │
-│  │                         │  │ ├─ Competitor: 12%            │   │
-│  │                         │  │ ├─ P1 Tickets: 10%            │   │
-│  │                         │  │ ├─ NPS Detractor: 10%         │   │
-│  │                         │  │ ├─ Open Tickets: 8%           │   │
-│  │                         │  │ ├─ Exec Escalation: 8%        │   │
-│  │                         │  │ ├─ Budget Concern: 7%         │   │
-│  │                         │  │ ├─ Champion Loss: 6%          │   │
-│  │                         │  │ ├─ NPS Deterioration: 5%      │   │
-│  │                         │  │ ├─ SDK Deprecation: 5%        │   │
-│  │                         │  │ ├─ Product Risk: 5%           │   │
-│  │                         │  │ └─ Missed QBRs: 4%            │   │
-│  │                         │  │                                 │   │
-│  └─────────────────────────┘  └─────────────────────────────────┘   │
-│                                                                        │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │            LLM INTELLIGENCE LAYER (Dual-LLM)              │   │
-│  │                                                             │   │
-│  │  GROQ (Fast Extraction):          GEMINI (Reasoning):     │   │
-│  │  ├─ Competitor mentions          ├─ Signal narratives    │   │
-│  │  ├─ Budget concerns              ├─ Risk explanations    │   │
-│  │  ├─ Org changes                  ├─ Multimodal charts    │   │
-│  │  └─ Sentiment extraction         └─ Action recommendations
-│  │                                                             │   │
-│  │  FALLBACK: Heuristic extraction (no API keys)             │   │
-│  │                                                             │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│                                                                        │
-└──────────────────────────────┬────────────────────────────────────────┘
-                               │
-┌──────────────────────────────┼────────────────────────────────────────┐
-│                 DATA ACCESS & TRANSFORMATION LAYER                    │
-│                                                                        │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  data/loader.py                                             │   │
-│  │  ├─ Parse 6 CSV/TXT/MD files                               │   │
-│  │  ├─ Type coercion (dates, numbers)                        │   │
-│  │  ├─ Normalize account names                               │   │
-│  │  └─ Handle missing values                                 │   │
-│  └──────────────────┬───────────────────────────────────────┘   │
-│                     │                                             │
-│  ┌──────────────────▼───────────────────────────────────────┐   │
-│  │  data/reconciler.py                                     │   │
-│  │  ├─ Fuzzy match CSM notes to account IDs (75% threshold)│   │
-│  │  ├─ Link garbled names to actual accounts              │   │
-│  │  └─ Output: reconciliation confidence scores            │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                        │
-└──────────────────────────────┬────────────────────────────────────────┘
-                               │
-┌──────────────────────────────┼────────────────────────────────────────┐
-│                      DATA LAYER (Immutable)                           │
-│                                                                        │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  data/raw/ (6 Data Sources - Read Only)                    │   │
-│  │                                                             │   │
-│  │  Structured Data:                  Unstructured Data:      │   │
-│  │  ├─ accounts.csv (120 rows)        ├─ csm_notes.txt       │   │
-│  │  ├─ usage_metrics.csv (6 months)  │  (120+ notes)        │   │
-│  │  ├─ support_tickets.csv (~500)    └─ changelog.md        │   │
-│  │  └─ nps_responses.csv (120+)         (product releases)   │   │
-│  │                                                             │   │
-│  │  Data Quality: ~94% reconciliation success rate           │   │
-│  │                                                             │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│         PRESENTATION LAYER                          │
+│  Risk Summary | Drill-Down | Data Quality | Export  │
+└──────────────────┬──────────────────────────────────┘
+                   │
+┌──────────────────┴──────────────────────────────────┐
+│      ORCHESTRATION LAYER                            │
+│  Load Data → Reconcile → Analyze → Score → Display  │
+└──────────────────┬──────────────────────────────────┘
+                   │
+        ┌──────────┴──────────┬──────────┐
+        │                     │          │
+┌───────▼────────┐   ┌─────────▼─────┐   │
+│   ANALYSIS      │  │  RISK SCORING │   │
+│  ├─ Usage       │  │  ├─ Signals   │   │
+│  ├─ Tickets     │  │  │  (12×)     │   │
+│  ├─ NPS         │  │  └─ Weights   │   │
+│  └─ Changelog   │  └────────┬──────┘   │
+└────────┬────────┘           │          │
+         │                    │          │
+         └────────┬───────────┘          │
+                  │                      │
+         ┌────────▼──────────┐           │
+         │  LLM LAYER        │           │
+         │  Groq + Gemini    │◄──────────┘
+         │  (Fallback OK)    │
+         └────────┬──────────┘
+                  │
+         ┌────────▼──────────┐
+         │ DATA ACCESS LAYER │
+         │ Loader + Reconcile│
+         │ (Fuzzy Match 75%) │
+         └────────┬──────────┘
+                  │
+         ┌────────▼──────────┐
+         │   DATA LAYER      │
+         │  6 Data Sources   │
+         │  (Immutable)      │
+         └───────────────────┘
 ```
-
-### Directory Structure
-
-```
-renewal_intelligence/
-├── app.py                      # Streamlit main app (4-tab dashboard)
-├── config/settings.py          # Centralized config with justified weights
-├── data/
-│   ├── loader.py               # Data ingestion & cleaning (all 6 sources)
-│   └── reconciler.py           # Fuzzy matching with RapidFuzz
-├── analysis/
-│   ├── usage_analyzer.py       # 6-month trend analysis with severity scoring
-│   ├── ticket_analyzer.py      # Multi-dimensional ticket risk assessment
-│   ├── nps_analyzer.py         # NPS with contradiction detection
-│   └── changelog_analyzer.py   # Product Risk Impact (changelog ↔ tickets)
-├── llm/
-│   ├── groq_client.py          # Groq/Llama 3.3 70B — extraction tasks
-│   ├── gemini_client.py        # Gemini 2.5 Flash — reasoning + multimodal
-│   └── prompts.py              # All prompt templates (centralized)
-├── risk/
-│   ├── signals.py              # Signal normalization [0,1] from all sources
-│   └── scoring.py              # Weighted scoring engine with explainability
-├── visualization/
-│   └── charts.py               # Plotly charts (dark theme, multimodal-ready)
-├── pages/                      # Streamlit sub-pages (drill-down views)
-└── data/
-    ├── raw/                    # 6 data sources (read-only)
-    └── processed/              # Intermediate outputs (cached)
-```
-
-### Layer Responsibilities
-
-| Layer | Responsibility | Key Files |
-|-------|-----------------|-----------|
-| **Presentation** | User interface, dashboards, visualizations | `app.py`, `pages/` |
-| **Orchestration** | Pipeline coordination, data flow | `main.py` (runner) |
-| **Business Logic** | Risk analysis, signal extraction, scoring | `analysis/`, `risk/` |
-| **LLM Intelligence** | AI-powered extraction & reasoning | `llm/` |
-| **Data Access** | Ingestion, cleaning, reconciliation | `data/loader.py`, `data/reconciler.py` |
-| **Data Storage** | Raw sources (immutable) | `data/raw/` |
 
 ## Quick Start
 
